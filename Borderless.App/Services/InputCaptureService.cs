@@ -4,14 +4,13 @@ using Borderless.App.Native;
 
 namespace Borderless.App.Services;
 
-/// <summary>
-/// Cursor clip / hide and window menu removal for matched game windows.
-/// </summary>
+/// <summary>Cursor clip, hide, and menu removal for matched windows.</summary>
 public sealed class InputCaptureService : IDisposable
 {
     private readonly Dictionary<nint, nint> _menuBackups = new();
     private readonly HashSet<nint> _menusRemoved = [];
     private nint _clipHwnd;
+    private NativeMethods.Rect _lastClipRect;
     private bool _cursorHidden;
     private bool _disposed;
 
@@ -48,10 +47,7 @@ public sealed class InputCaptureService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Restore input state for windows that no longer match, and clear global
-    /// cursor lock/hide when the foreground is not an active capture target.
-    /// </summary>
+    /// <summary>Drop capture for dead matches; clear clip/hide if foreground is not a target.</summary>
     public void SyncActiveWindows(HashSet<nint> activeHwnds, nint foregroundHwnd, bool foregroundWantsClip, bool foregroundWantsHide)
     {
         foreach (var hwnd in _menusRemoved.ToList())
@@ -141,8 +137,15 @@ public sealed class InputCaptureService : IDisposable
             return;
         }
 
+        // Skip ClipCursor when hwnd + client rect unchanged.
+        if (_clipHwnd == hwnd && RectEquals(_lastClipRect, clip))
+        {
+            return;
+        }
+
         _ = NativeMethods.ClipCursor(ref clip);
         _clipHwnd = hwnd;
+        _lastClipRect = clip;
     }
 
     private void ClearClip()
@@ -156,6 +159,9 @@ public sealed class InputCaptureService : IDisposable
         _clipHwnd = 0;
     }
 
+    private static bool RectEquals(NativeMethods.Rect a, NativeMethods.Rect b) =>
+        a.Left == b.Left && a.Top == b.Top && a.Right == b.Right && a.Bottom == b.Bottom;
+
     private void EnsureCursorHidden()
     {
         if (_cursorHidden)
@@ -165,7 +171,7 @@ public sealed class InputCaptureService : IDisposable
 
         while (NativeMethods.ShowCursor(false) >= 0)
         {
-            // Drive display count negative.
+            // ShowCursor returns display count; hide until negative.
         }
 
         _cursorHidden = true;
@@ -180,7 +186,7 @@ public sealed class InputCaptureService : IDisposable
 
         while (NativeMethods.ShowCursor(true) < 0)
         {
-            // Drive display count non-negative.
+            // Restore until display count is non-negative.
         }
 
         _cursorHidden = false;
