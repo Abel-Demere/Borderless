@@ -7,10 +7,7 @@ using Button = System.Windows.Controls.Button;
 
 namespace Borderless.App.Controls;
 
-/// <summary>
-/// Clickable settings row: title + muted subtitle, optional info tooltip, toggle on the right.
-/// Clicking the row (outside the switch / info icon) toggles <see cref="IsChecked"/>.
-/// </summary>
+/// <summary>Settings row with title, optional subtitle/info tip, and toggle. Row click toggles.</summary>
 public class SwitchOptionRow : Control
 {
     public static readonly DependencyProperty TitleProperty =
@@ -63,7 +60,6 @@ public class SwitchOptionRow : Control
         set => SetValue(TitleProperty, value);
     }
 
-    /// <summary>Muted subtitle under the title. Hidden when null/empty.</summary>
     public string Description
     {
         get => (string)GetValue(DescriptionProperty);

@@ -4,9 +4,6 @@ using Borderless.App.Native;
 
 namespace Borderless.App.Services;
 
-/// <summary>
-/// Applies borderless, expand-to-screen, and always-on-top styles to native windows.
-/// </summary>
 public sealed class WindowStyleService
 {
     private const int StandardChromeStyle =
@@ -23,6 +20,10 @@ public sealed class WindowStyleService
         | NativeMethods.WsExStaticEdge
         | NativeMethods.WsExWindowEdge;
 
+    /// <summary>Bits that trigger a later-tick style rewrite.</summary>
+    private const int SoftReassertChromeStyle =
+        NativeMethods.WsCaption | NativeMethods.WsThickFrame;
+
     private readonly Dictionary<nint, ChromeBackup> _chromeBackups = new();
     private readonly HashSet<nint> _managedHwnds = [];
     private readonly Dictionary<nint, bool> _topMostState = new();
@@ -34,7 +35,6 @@ public sealed class WindowStyleService
             return;
         }
 
-        // Re-assert every tick — games (esp. already-borderless titles) reset style/z-order.
         if (rule.IsBorderless)
         {
             ApplyBorderlessChrome(hwnd);
@@ -51,7 +51,7 @@ public sealed class WindowStyleService
             ApplyBounds(hwnd, rule);
         }
 
-        // Topmost last so it wins over style/bounds SetWindowPos.
+        // After style/bounds so z-order sticks.
         ApplyAlwaysOnTop(hwnd, rule.IsAlwaysOnTop);
     }
 
@@ -74,9 +74,6 @@ public sealed class WindowStyleService
         _topMostState[hwnd] = enabled;
     }
 
-    /// <summary>
-    /// Drop tracking for HWNDs that no longer match a rule. Restores chrome / topmost when still alive.
-    /// </summary>
     public void SyncActiveWindows(HashSet<nint> activeHwnds)
     {
         foreach (var hwnd in CollectTrackedHwnds())
@@ -161,32 +158,37 @@ public sealed class WindowStyleService
 
     private void ApplyBorderlessChrome(nint hwnd)
     {
-        var currentStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GwlStyle).ToInt32();
-        var currentExStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GwlExStyle).ToInt32();
+        var currentStyle = ReadStyle(hwnd, NativeMethods.GwlStyle);
+        var currentExStyle = ReadStyle(hwnd, NativeMethods.GwlExStyle);
+        var isFirstApply = !_managedHwnds.Contains(hwnd);
 
         if (!_chromeBackups.ContainsKey(hwnd))
         {
-            // Keep chrome bits in the backup even if the window was already borderless.
-            var restoreStyle = currentStyle | StandardChromeStyle;
-            restoreStyle &= ~NativeMethods.WsPopup;
+            var restoreStyle = (currentStyle | StandardChromeStyle) & ~NativeMethods.WsPopup;
             var restoreExStyle = currentExStyle | NativeMethods.WsExWindowEdge;
-
             _chromeBackups[hwnd] = new ChromeBackup(restoreStyle, restoreExStyle);
         }
 
         _managedHwnds.Add(hwnd);
 
-        // Clear any remaining chrome bits — already-borderless games may keep WS_BORDER etc.
-        var desiredStyle = currentStyle & ~StandardChromeStyle;
-        var desiredExStyle = currentExStyle & ~StandardChromeExStyle;
-        var changed = desiredStyle != currentStyle || desiredExStyle != currentExStyle;
+        var needsStrip = isFirstApply
+            ? (currentStyle & StandardChromeStyle) != 0 || (currentExStyle & StandardChromeExStyle) != 0
+            : (currentStyle & SoftReassertChromeStyle) != 0;
 
-        if (changed)
+        if (!needsStrip)
         {
-            NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GwlStyle, new IntPtr(desiredStyle));
-            NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GwlExStyle, new IntPtr(desiredExStyle));
-            NotifyFrameChanged(hwnd);
+            return;
         }
+
+        NativeMethods.SetWindowLongPtr(
+            hwnd,
+            NativeMethods.GwlStyle,
+            new IntPtr(currentStyle & ~StandardChromeStyle));
+        NativeMethods.SetWindowLongPtr(
+            hwnd,
+            NativeMethods.GwlExStyle,
+            new IntPtr(currentExStyle & ~StandardChromeExStyle));
+        NotifyFrameChanged(hwnd, redraw: isFirstApply);
     }
 
     private void RestoreBorderlessChrome(nint hwnd)
@@ -201,22 +203,19 @@ public sealed class WindowStyleService
             ForceStandardChrome(hwnd);
         }
 
-        NotifyFrameChanged(hwnd);
+        NotifyFrameChanged(hwnd, redraw: true);
     }
 
     private static void ForceStandardChrome(nint hwnd)
     {
-        var style = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GwlStyle).ToInt32();
-        style &= ~NativeMethods.WsPopup;
-        style |= StandardChromeStyle;
+        var style = (ReadStyle(hwnd, NativeMethods.GwlStyle) & ~NativeMethods.WsPopup) | StandardChromeStyle;
         NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GwlStyle, new IntPtr(style));
 
-        var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GwlExStyle).ToInt32();
-        exStyle |= NativeMethods.WsExWindowEdge;
+        var exStyle = ReadStyle(hwnd, NativeMethods.GwlExStyle) | NativeMethods.WsExWindowEdge;
         NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GwlExStyle, new IntPtr(exStyle));
     }
 
-    private static void NotifyFrameChanged(nint hwnd)
+    private static void NotifyFrameChanged(nint hwnd, bool redraw)
     {
         NativeMethods.SetWindowPos(
             hwnd,
@@ -230,6 +229,11 @@ public sealed class WindowStyleService
             | NativeMethods.SwpNoZOrder
             | NativeMethods.SwpFrameChanged
             | NativeMethods.SwpNoActivate);
+
+        if (!redraw)
+        {
+            return;
+        }
 
         NativeMethods.RedrawWindow(
             hwnd,
@@ -273,7 +277,6 @@ public sealed class WindowStyleService
 
         if (rule.IsBorderless)
         {
-            // Prefer client-area sizing for already-borderless / popup games.
             if (NativeWindowGeometry.TryGetClientScreenRect(hwnd, out var client)
                 && client.Left == targetX
                 && client.Top == targetY
@@ -302,8 +305,8 @@ public sealed class WindowStyleService
             Bottom = targetY + targetHeight
         };
 
-        var style = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GwlStyle).ToInt32();
-        var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GwlExStyle).ToInt32();
+        var style = ReadStyle(hwnd, NativeMethods.GwlStyle);
+        var exStyle = ReadStyle(hwnd, NativeMethods.GwlExStyle);
         if (!NativeMethods.AdjustWindowRectEx(ref clientRect, style, false, exStyle))
         {
             NativeMethods.SetWindowPos(
@@ -347,6 +350,9 @@ public sealed class WindowStyleService
         monitorRect = info.Monitor;
         return true;
     }
+
+    private static int ReadStyle(nint hwnd, int index) =>
+        unchecked((int)NativeMethods.GetWindowLongPtr(hwnd, index).ToInt64());
 
     private readonly record struct ChromeBackup(int Style, int ExStyle);
 }
