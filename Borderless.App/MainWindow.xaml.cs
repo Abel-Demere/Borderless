@@ -31,6 +31,17 @@ public partial class MainWindow : FluentWindow
     {
         DataContext = App.MainViewModel;
         InitializeComponent();
+
+        // Do not hide the window during its initial Loaded/navigation cycle.
+        // Starting minimized keeps the navigation/content tree initialized so
+        // restoring the window from the tray does not produce an empty window.
+        if (ViewModel.Settings.StartMinimizedToTray)
+        {
+            ShowActivated = false;
+            ShowInTaskbar = false;
+            WindowState = WindowState.Minimized;
+        }
+
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         Loaded += OnLoaded;
         Closed += OnClosed;
@@ -292,13 +303,20 @@ public partial class MainWindow : FluentWindow
 
     private void ToggleWindowVisibility()
     {
-        if (IsVisible)
+        // A startup-minimized window is still visible to WPF, but not to the user.
+        if (IsVisible && WindowState != WindowState.Minimized)
         {
             Hide();
             return;
         }
 
-        Show();
+        if (!IsVisible)
+        {
+            Show();
+        }
+
+        ShowInTaskbar = true;
+        ShowActivated = true;
         WindowState = WindowState.Normal;
         Activate();
     }
@@ -310,7 +328,8 @@ public partial class MainWindow : FluentWindow
             return;
         }
 
-        TrayToggleMenuItem.Header = IsVisible ? Loc.Get("TrayHide") : Loc.Get("TrayShow");
+        var isShownToUser = IsVisible && WindowState != WindowState.Minimized;
+        TrayToggleMenuItem.Header = isShownToUser ? Loc.Get("TrayHide") : Loc.Get("TrayShow");
     }
 
     private void OpenSidebar()
